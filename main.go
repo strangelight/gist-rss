@@ -6,7 +6,6 @@ import (
 	"io"
 	"io/ioutil"
 	"net/http"
-	"strconv"
 	"time"
 
 	"appengine"
@@ -15,10 +14,9 @@ import (
 )
 
 const (
-	APPENGINE_ID  = "gist-rss"
-	GITHUB_ID     = "danielvargas"
-	EMAIL         = "danielgvargas@gmail.com"
-	TIMEOUT_CACHE = 1
+	APPENGINE_ID = "gist-rss"
+	GITHUB_ID    = "danielvargas"
+	EMAIL        = "danielgvargas@gmail.com"
 )
 
 type Gist struct {
@@ -105,73 +103,25 @@ func serveError(c appengine.Context, w http.ResponseWriter, err error) {
 
 func handle(w http.ResponseWriter, r *http.Request) {
 	c := appengine.NewContext(r)
-	item, err := memcache.Get(c, "last_update")
-	if err != nil && err != memcache.ErrCacheMiss {
-		serveError(c, w, err)
-		return
-	}
-	// Github public API (for unauthenticated requests) have rate limit of 60 requests per hour.
-	if err != nil {
-		item = &memcache.Item{
-			Key:   "last_update",
-			Value: []byte(strconv.Itoa(int(time.Now().Unix()))),
-		}
-		err = memcache.Set(c, item)
-		if err != nil {
-			serveError(c, w, err)
-			return
-		}
-	}
-	gistitem, err := memcache.Get(c, "gist")
-	if err != nil && err != memcache.ErrCacheMiss {
-		serveError(c, w, err)
-		return
-	}
-	if err != nil {
-		url := "https://api.github.com/users/" + GITHUB_ID + "/gists"
-		client := urlfetch.Client(c)
-		res, _ := client.Get(url)
-		defer res.Body.Close()
-		body, _ := ioutil.ReadAll(res.Body)
-		gistitem = &memcache.Item{
-			Key:   "gist",
-			Value: body,
-		}
-		err = memcache.Set(c, gistitem)
-		if err != nil {
-			serveError(c, w, err)
-			return
-		}
-	}
-	a, _ := strconv.Atoi(string(item.Value))
-	last_time := time.Unix(int64(a), 0)
-	if last_time.Add(time.Duration(TIMEOUT_CACHE)*time.Minute).Unix() < time.Now().Unix() {
-		url := "https://api.github.com/users/" + GITHUB_ID + "/gists"
-		client := urlfetch.Client(c)
-		res, _ := client.Get(url)
-		defer res.Body.Close()
-		body, _ := ioutil.ReadAll(res.Body)
-		gistitem = &memcache.Item{
-			Key:   "gist",
-			Value: body,
-		}
-		err = memcache.Set(c, gistitem)
-		if err != nil {
-			serveError(c, w, err)
-			return
-		}
-		item = &memcache.Item{
-			Key:   "last_update",
-			Value: []byte(strconv.Itoa(int(time.Now().Unix()))),
-		}
-		err = memcache.Set(c, item)
-		if err != nil {
-			serveError(c, w, err)
-			return
-		}
-	}
+	url := "https://api.github.com/users/" + GITHUB_ID + "/gists"
+	client := urlfetch.Client(c)
+	res, _ := client.Get(url)
+	defer res.Body.Close()
+	body, _ := ioutil.ReadAll(res.Body)
 	var data []Gist
-	json.Unmarshal(gistitem.Value, &data)
+	if res.Header.Get("X-RateLimit-Remaining") != "0" {
+		json.Unmarshal(body, &data)
+	} else if res.Header.Get("X-RateLimit-Remaining") == "1" {
+		gistitem := &memcache.Item{
+			Key:   "gist",
+			Value: body,
+		}
+		memcache.Set(c, gistitem)
+		json.Unmarshal(body, &data)
+	} else {
+		gistitem, _ := memcache.Get(c, "gist")
+		json.Unmarshal(gistitem.Value, &data)
+	}
 	entries := make([]Entry, 0)
 	for _, gist := range data {
 		if gist.Description != "" {
