@@ -11,12 +11,8 @@ import (
 	"appengine"
 	"appengine/memcache"
 	"appengine/urlfetch"
-)
 
-const (
-	APPENGINE_ID = "gist-rss"
-	GITHUB_ID    = "danielvargas"
-	EMAIL        = "danielgvargas@gmail.com"
+	"github.com/gorilla/mux"
 )
 
 type Gist struct {
@@ -94,51 +90,77 @@ type Entry struct {
 	Type    string `xml:"type,attr"`
 }
 
-func serveError(c appengine.Context, w http.ResponseWriter, err error) {
+func serveError(c appengine.Context, w http.ResponseWriter, err error, msg string) {
 	w.WriteHeader(http.StatusInternalServerError)
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	io.WriteString(w, "Internal Server Error")
+	if msg == "" {
+		io.WriteString(w, "Internal Server Error")
+	} else {
+		io.WriteString(w, msg)
+	}
 	c.Errorf("%v", err)
 }
 
 func handle(w http.ResponseWriter, r *http.Request) {
 	c := appengine.NewContext(r)
-	url := "https://api.github.com/users/" + GITHUB_ID + "/gists"
+	vars := mux.Vars(r)
+	user := vars["user"]
+	url := "https://api.github.com/users/" + user + "/gists"
 	client := urlfetch.Client(c)
-	res, _ := client.Get(url)
-	defer res.Body.Close()
-	body, _ := ioutil.ReadAll(res.Body)
+	res, err := client.Get(url)
+	if err != nil {
+		serveError(c, w, err, "")
+	}
+	body, err := ioutil.ReadAll(res.Body)
+	if err != nil {
+		serveError(c, w, err, "")
+	}
 	var data []Gist
+	var gistitem *memcache.Item
+	gistitem = &memcache.Item{
+		Key:   "gist_" + user,
+		Value: body,
+	}
 	if res.Header.Get("X-RateLimit-Remaining") != "0" {
-		json.Unmarshal(body, &data)
-	} else if res.Header.Get("X-RateLimit-Remaining") == "1" {
-		gistitem := &memcache.Item{
-			Key:   "gist",
-			Value: body,
+		if err := memcache.Add(c, gistitem); err == memcache.ErrNotStored {
+			err = memcache.Set(c, gistitem)
 		}
-		memcache.Set(c, gistitem)
-		json.Unmarshal(body, &data)
+		if err != nil {
+			serveError(c, w, err, "")
+		}
+		err = json.Unmarshal(body, &data)
+		if err != nil {
+			serveError(c, w, err, "")
+		}
 	} else {
-		gistitem, _ := memcache.Get(c, "gist")
-		json.Unmarshal(gistitem.Value, &data)
+		if gistitem, err = memcache.Get(c, "gist_"+user); err == memcache.ErrCacheMiss {
+			serveError(c, w, err, "Github API rate limit exceeded =/, back later...")
+		} else if err != nil {
+			serveError(c, w, err, "")
+		}
+	}
+	err = json.Unmarshal(gistitem.Value, &data)
+	if err != nil {
+		serveError(c, w, err, "")
 	}
 	entries := make([]Entry, 0)
 	for _, gist := range data {
 		if gist.Description != "" {
 			t, _ := time.Parse(time.RFC3339, gist.Updated_At)
-			entries = append(entries, Entry{Title: gist.Description, Updated: t.String(), Id: gist.Html_Url, Content: "<script src='https://gist.github.com/" + GITHUB_ID + "/" + gist.Id + ".js'></script>", Type: "html", Link: Link{Href: gist.Html_Url}})
+			entries = append(entries, Entry{Title: gist.Description, Updated: t.String(), Id: gist.Html_Url, Type: "html", Content: "", Link: Link{Href: gist.Html_Url}})
 		}
 	}
-
-	v := &Atom{Xmlns: "http://www.w3.org/2005/Atom", Title: GITHUB_ID + " gists", Updated: time.Now().Format(time.RFC3339), Id: "http://" + APPENGINE_ID + ".appspot.com", Name: GITHUB_ID, Email: EMAIL, Link: []Link{{"http://" + APPENGINE_ID + ".appspot.com", "self"}, {Href: "http://" + APPENGINE_ID + ".appspot.com"}}, Entry: entries}
+	v := &Atom{Xmlns: "http://www.w3.org/2005/Atom", Title: user + " gists", Updated: time.Now().Format(time.RFC3339), Id: "http://gist-rss.appspot.com/" + user, Name: user, Email: "", Link: []Link{{"http://gist-rss.appspot.com/" + user, "self"}, {Href: "http://gist-rss.appspot.com/" + user}}, Entry: entries}
 	w.Header().Set("Content-Type", "application/xml")
 	w.WriteHeader(http.StatusOK)
 	enc := xml.NewEncoder(w)
 	if err := enc.Encode(v); err != nil {
-		serveError(c, w, err)
+		serveError(c, w, err, "")
 	}
 }
 
 func init() {
-	http.HandleFunc("/", handle)
+	m := mux.NewRouter()
+	m.HandleFunc("/{user}", handle).Methods("GET")
+	http.Handle("/", m)
 }
