@@ -101,6 +101,11 @@ func serveError(c appengine.Context, w http.ResponseWriter, err error, msg strin
 	c.Errorf("%v", err)
 }
 
+func info(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	io.WriteString(w, "Usage: https://gist-rss.appspot.com/<GITHUB_USER>")
+}
+
 func handle(w http.ResponseWriter, r *http.Request) {
 	c := appengine.NewContext(r)
 	vars := mux.Vars(r)
@@ -110,6 +115,10 @@ func handle(w http.ResponseWriter, r *http.Request) {
 	res, err := client.Get(url)
 	if err != nil {
 		serveError(c, w, err, "")
+	}
+	if res.StatusCode == http.StatusNotFound {
+		serveError(c, w, err, user+" not found.. =(")
+		return
 	}
 	body, err := ioutil.ReadAll(res.Body)
 	if err != nil {
@@ -161,6 +170,7 @@ func handle(w http.ResponseWriter, r *http.Request) {
 
 func init() {
 	m := mux.NewRouter()
+	m.HandleFunc("/", info).Methods("GET")
 	m.HandleFunc("/{user}", handle).Methods("GET")
 	http.Handle("/", m)
 }
